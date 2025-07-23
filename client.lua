@@ -1,97 +1,158 @@
-local towing = false
-local towedVehicle = nil
-local ropeHandle = nil
-local ropeObject = nil
+-- Safezone Client Script
+local safezones = {}
+local playerInSafezone = false
+local currentSafezone = nil
 
--- List of allowed tow trucks
-local validTowTrucks = {
-    ["flatbed"] = true,
-    ["flatbed2"] = true,
-    ["flatbed3"] = true,
-    ["towtruck"] = true,
-    ["towtruck2"] = true
-}
+-- Load safezones from server
+RegisterNetEvent('safezone:update')
+AddEventHandler('safezone:update', function(zones)
+    safezones = zones or {}
+end)
 
-RegisterCommand("tow", function()
-    local ped = PlayerPedId()
-    local towTruck = GetVehiclePedIsIn(ped, true)
-
-    if towTruck == 0 then
-        Notify("~r~You must be in a tow truck.")
-        return
-    end
-
-    local modelName = GetDisplayNameFromVehicleModel(GetEntityModel(towTruck)):lower()
-    if not validTowTrucks[modelName] then
-        Notify("~r~This is not a tow truck.")
-        return
-    end
-
-    local targetVeh = GetVehicleInDirection(ped)
-    if not towing and targetVeh ~= 0 then
-        StartTowAnimation(ped)
-
-        -- Attach with rope
-        local towPos = GetEntityCoords(towTruck)
-        local targetPos = GetEntityCoords(targetVeh)
-
-        ropeHandle = AddRope(towPos.x, towPos.y, towPos.z + 1.0, 0.0, 0.0, 0.0, 10.0, 1, 0.0, 10.0, 0.0, false, false, true, 10.0, false)
-        ropeObject = CreateObject(`prop_tool_hook`, towPos.x, towPos.y, towPos.z + 1.0, true, true, true)
-
-        AttachEntitiesToRope(ropeHandle, towTruck, targetVeh, towPos.x, towPos.y, towPos.z + 1.0, targetPos.x, targetPos.y, targetPos.z + 0.5, 10.0, false, false, nil, nil)
-        RopeLoadTextures()
-
-        AttachEntityToEntity(targetVeh, towTruck, 20, 0.0, -3.5, 1.0, 0.0, 0.0, 0.0, false, false, true, false, 2, true)
-
-        towing = true
-        towedVehicle = targetVeh
-
-        Notify("~g~Vehicle attached with winch.")
-    elseif towing then
-        DetachEntity(towedVehicle, true, true)
-        PlaceObjectOnGroundProperly(towedVehicle)
-
-        if DoesRopeExist(ropeHandle) then
-            DeleteRope(ropeHandle)
-            ropeHandle = nil
+-- Main thread for safezone detection and effects
+Citizen.CreateThread(function()
+    while true do
+        local playerPed = PlayerPedId()
+        local playerCoords = GetEntityCoords(playerPed)
+        local inSafezone = false
+        local nearestZone = nil
+        
+        -- Check if player is in any safezone
+        for i, zone in ipairs(safezones) do
+            local distance = #(playerCoords - vector3(zone.x, zone.y, zone.z))
+            if distance <= zone.radius then
+                inSafezone = true
+                nearestZone = zone
+                break
+            end
         end
-
-        if DoesEntityExist(ropeObject) then
-            DeleteEntity(ropeObject)
-            ropeObject = nil
+        
+        -- Handle safezone entry/exit
+        if inSafezone and not playerInSafezone then
+            -- Player entered safezone
+            playerInSafezone = true
+            currentSafezone = nearestZone
+            EnterSafezone()
+        elseif not inSafezone and playerInSafezone then
+            -- Player exited safezone
+            playerInSafezone = false
+            currentSafezone = nil
+            ExitSafezone()
         end
-
-        towing = false
-        towedVehicle = nil
-
-        Notify("~y~Vehicle detached.")
-    else
-        Notify("~r~No vehicle to tow.")
+        
+        -- Apply safezone effects
+        if playerInSafezone then
+            ApplySafezoneEffects(playerPed)
+        end
+        
+        Citizen.Wait(100) -- Check every 100ms
     end
 end)
 
-function GetVehicleInDirection(ped)
-    local coords = GetEntityCoords(ped)
-    local forward = GetOffsetFromEntityInWorldCoords(ped, 0.0, 5.0, 0.0)
-    local ray = StartShapeTestRay(coords.x, coords.y, coords.z, forward.x, forward.y, forward.z, 10, ped, 0)
-    local _, _, _, _, vehicle = GetShapeTestResult(ray)
-    return vehicle
-end
-
-function StartTowAnimation(ped)
-    local dict = "amb@world_human_vehicle_mechanic@male@base"
-    RequestAnimDict(dict)
-    while not HasAnimDictLoaded(dict) do
-        Wait(10)
+-- Thread for drawing safezone markers
+Citizen.CreateThread(function()
+    while true do
+        if #safezones > 0 then
+            for i, zone in ipairs(safezones) do
+                -- Draw marker on ground
+                DrawMarker(1, zone.x, zone.y, zone.z - 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
+                    zone.radius * 2.0, zone.radius * 2.0, 1.0, 0, 255, 0, 50, false, true, 2, false, nil, nil, false)
+                
+                -- Draw 3D marker in air
+                DrawMarker(1, zone.x, zone.y, zone.z + 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
+                    zone.radius * 2.0, zone.radius * 2.0, 1.0, 0, 255, 0, 30, false, true, 2, false, nil, nil, false)
+            end
+        end
+        Citizen.Wait(0)
     end
+end)
 
-    TaskPlayAnim(ped, dict, "base", 8.0, -8.0, 2500, 1, 0, false, false, false)
-    Wait(2500)
-    ClearPedTasks(ped)
+-- Function called when player enters safezone
+function EnterSafezone()
+    local playerPed = PlayerPedId()
+    
+    -- Show notification
+    TriggerEvent('chat:addMessage', {
+        args = {'Safezone', '^2You have entered a safezone. Combat is disabled.'}
+    })
+    
+    -- Play sound effect (optional)
+    PlaySoundFrontend(-1, "CHECKPOINT_PERFECT", "HUD_MINI_GAME_SOUNDSET", 1)
+    
+    -- Set player invincible
+    SetEntityInvincible(playerPed, true)
+    
+    -- Disable weapons
+    SetCurrentPedWeapon(playerPed, GetHashKey("WEAPON_UNARMED"), true)
+    
+    -- Clear any current weapon
+    RemoveAllPedWeapons(playerPed, true)
 end
 
-function Notify(text)
-    SetNotificationTextEntry("STRING")
-    AddTextComponentString(text)
-    DrawNotification(false, true)
+-- Function called when player exits safezone
+function ExitSafezone()
+    local playerPed = PlayerPedId()
+    
+    -- Show notification
+    TriggerEvent('chat:addMessage', {
+        args = {'Safezone', '^3You have left the safezone. Combat is re-enabled.'}
+    })
+    
+    -- Play sound effect (optional)
+    PlaySoundFrontend(-1, "CHECKPOINT_MISSED", "HUD_MINI_GAME_SOUNDSET", 1)
+    
+    -- Remove invincibility
+    SetEntityInvincible(playerPed, false)
 end
+
+-- Function to apply safezone effects while player is inside
+function ApplySafezoneEffects(playerPed)
+    -- Keep player invincible
+    SetEntityInvincible(playerPed, true)
+    
+    -- Disable weapon switching
+    DisableControlAction(0, 24, true) -- Attack
+    DisableControlAction(0, 25, true) -- Aim
+    DisableControlAction(0, 37, true) -- Weapon wheel
+    DisableControlAction(0, 44, true) -- Cover
+    DisableControlAction(0, 45, true) -- Reload
+    DisableControlAction(0, 140, true) -- Melee attack
+    DisableControlAction(0, 141, true) -- Melee attack 2
+    DisableControlAction(0, 142, true) -- Melee attack alternate
+    DisableControlAction(0, 257, true) -- Attack 2
+    DisableControlAction(0, 263, true) -- Melee attack 1
+    DisableControlAction(0, 264, true) -- Melee attack 2
+    
+    -- Disable vehicle attacks
+    DisableControlAction(0, 69, true) -- Vehicle attack
+    DisableControlAction(0, 70, true) -- Vehicle attack 2
+    DisableControlAction(0, 92, true) -- Vehicle attack
+    DisableControlAction(0, 114, true) -- Vehicle attack
+    DisableControlAction(0, 140, true) -- Vehicle attack
+    DisableControlAction(0, 141, true) -- Vehicle attack 2
+    DisableControlAction(0, 142, true) -- Vehicle attack alternate
+    DisableControlAction(0, 257, true) -- Vehicle attack
+    DisableControlAction(0, 263, true) -- Vehicle attack 2
+    DisableControlAction(0, 264, true) -- Vehicle attack alternate
+    
+    -- Remove any weapons that might have been given
+    RemoveAllPedWeapons(playerPed, true)
+end
+
+-- Debug command to show safezone info (admin only)
+RegisterCommand('safezoneinfo', function()
+    if #safezones == 0 then
+        TriggerEvent('chat:addMessage', {
+            args = {'Safezone', 'No safezones configured.'}
+        })
+    else
+        TriggerEvent('chat:addMessage', {
+            args = {'Safezone', '^2Active safezones: ' .. #safezones}
+        })
+        for i, zone in ipairs(safezones) do
+            TriggerEvent('chat:addMessage', {
+                args = {'Safezone', string.format('Zone %d: (%.2f, %.2f, %.2f) - Radius: %.1f', i, zone.x, zone.y, zone.z, zone.radius)}
+            })
+        end
+    end
+end, false)
